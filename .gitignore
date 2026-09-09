@@ -1,0 +1,23 @@
+# Compiled class files and build output
+*.class
+out/
+out-test/
+bin/
+build/
+
+# Runtime data files (the app recreates them on first run)
+data/*.txt
+data-test/
+
+# IDE folders
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+nbproject/
+
+# OS files
+.DS_Store
+Thumbs.db

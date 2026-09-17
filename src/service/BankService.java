@@ -230,6 +230,54 @@ public class BankService {
         return settlement;
     }
 
+
+    // ------------------------------------------------------------------
+    // Loan integration
+    // ------------------------------------------------------------------
+
+    /**
+     * Pays an approved loan into the customer's account and logs it in the
+     * existing transaction history. A disbursement is money coming IN, so like
+     * a deposit it carries no tax.
+     */
+    public Transaction creditLoanDisbursement(int accountNumber, double amount)
+            throws InvalidAccountException {
+        Account account = findAccount(accountNumber);
+        double value = Validation.round(amount);
+        account.credit(value);
+        account.setBalance(Validation.round(account.getBalance()));
+        Transaction transaction = new Transaction(accountNumber, Transaction.LOAN_DISBURSED, value,
+                0.0, value, Transaction.NO_SECOND_ACCOUNT);
+        recordTransaction(transaction);
+        fileManager.saveAccounts(accounts);
+        return transaction;
+    }
+
+    /**
+     * Takes a loan repayment out of the customer's account and logs it in the
+     * existing transaction history.
+     *
+     * The balance is checked before anything is deducted. The repayment is
+     * deliberately tax free - the withdrawal tax applies to cash leaving the
+     * bank, while this money simply moves from the customer's account back to
+     * the bank's own loan book (the same reasoning as a closure settlement).
+     */
+    public Transaction debitLoanRepayment(int accountNumber, double amount)
+            throws InvalidAccountException, InsufficientBalanceException {
+        Account account = findAccount(accountNumber);
+        double value = Validation.round(amount);
+        if (value > account.getBalance()) {
+            throw new InsufficientBalanceException(value, account.getBalance());
+        }
+        account.debit(value);
+        account.setBalance(Validation.round(account.getBalance()));
+        Transaction transaction = new Transaction(accountNumber, Transaction.LOAN_REPAYMENT, value,
+                0.0, value, Transaction.NO_SECOND_ACCOUNT);
+        recordTransaction(transaction);
+        fileManager.saveAccounts(accounts);
+        return transaction;
+    }
+
     // ------------------------------------------------------------------
     // Shared helpers
     // ------------------------------------------------------------------

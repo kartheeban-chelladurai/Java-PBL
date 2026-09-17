@@ -5,12 +5,20 @@ import exception.AccountNotEmptyException;
 import exception.DuplicateAccountException;
 import exception.InsufficientBalanceException;
 import exception.InvalidAccountException;
+import exception.InvalidRepaymentException;
 import exception.InvalidTransferException;
+import exception.LoanNotEligibleException;
+import exception.LoanNotFoundException;
 import model.Account;
 import model.CurrentAccount;
+import model.EducationLoan;
+import model.Loan;
+import model.LoanRepayment;
+import model.PersonalLoan;
 import model.SavingsAccount;
 import model.Transaction;
 import service.BankService;
+import service.LoanService;
 import util.FileManager;
 import util.Validation;
 
@@ -44,6 +52,19 @@ public class BankSystemTest {
         testHistoryIsReadBackFromFile();
         testPersistenceAcrossRestart();
         testValidationRules();
+
+        // ---- Loan Management feature ----
+        testLoanInterestAndEmiMaths();
+        testLoanTypePolymorphism();
+        testLoanEligibilityRules();
+        testApplyForLoanCreditsAccount();
+        testLoanRepaymentDebitsAccount();
+        testInvalidRepaymentsAreRejected();
+        testRepaymentNeedsAccountBalance();
+        testLoanCompletion();
+        testRepaymentHistoryIsReadBackFromFile();
+        testLoansSurviveRestart();
+        testTaxCalculatorStillWorksAfterLoanFeature();
 
         cleanTestData();
 
@@ -348,8 +369,361 @@ public class BankSystemTest {
                 "CURRENT".equals(Validation.normaliseAccountType("c")));
         assertTrue("validation: unknown type rejected",
                 Validation.normaliseAccountType("gold") == null);
-        assertTrue("validation: menu choice 8 accepted", Validation.isValidMenuChoice("8"));
-        assertTrue("validation: menu choice 9 rejected", !Validation.isValidMenuChoice("9"));
+        assertTrue("validation: menu choice 10 accepted", Validation.isValidMenuChoice("10", 10));
+        assertTrue("validation: menu choice 11 rejected", !Validation.isValidMenuChoice("11", 10));
+        assertTrue("validation: loan submenu choice 7 accepted",
+                Validation.isValidMenuChoice("7", 7));
+        assertTrue("validation: loan submenu choice 8 rejected",
+                !Validation.isValidMenuChoice("8", 7));
+        assertTrue("validation: tenure 24 accepted", Validation.isValidTenure("24"));
+        assertTrue("validation: tenure 0 rejected", !Validation.isValidTenure("0"));
+        assertTrue("validation: tenure 400 rejected", !Validation.isValidTenure("400"));
+        assertTrue("validation: fractional tenure rejected", !Validation.isValidTenure("12.5"));
+        assertTrue("validation: '1' maps to PERSONAL",
+                "PERSONAL".equals(Validation.normaliseLoanType("1")));
+        assertTrue("validation: 'e' maps to EDUCATION",
+                "EDUCATION".equals(Validation.normaliseLoanType("e")));
+        assertTrue("validation: unknown loan type rejected",
+                Validation.normaliseLoanType("gold") == null);
+    }
+
+
+    // ------------------------------------------------------------------
+    // Loan Management
+    // ------------------------------------------------------------------
+
+    /** The worked example from the loan brief: 2,00,000 at 10% for 24 months. */
+    private static void testLoanInterestAndEmiMaths() {
+        Loan personal = new PersonalLoan(9001, 200000, 24);
+        assertEquals("loan maths: personal rate is 10%", 10.0, personal.getAnnualInterestRate());
+        assertEquals("loan maths: interest = P x R x T", 40000.0, personal.calculateInterest());
+        assertEquals("loan maths: total repayment", 240000.0, personal.getTotalRepayment());
+        assertEquals("loan maths: monthly EMI", 10000.0, personal.getMonthlyEmi());
+        assertEquals("loan maths: nothing paid yet", 240000.0, personal.getRemainingAmount());
+
+        // Education loan on the same figures, only the rate differs.
+        Loan education = new EducationLoan(9001, 200000, 24);
+        assertEquals("loan maths: education rate is 7%", 7.0, education.getAnnualInterestRate());
+        assertEquals("loan maths: education interest", 28000.0, education.calculateInterest());
+        assertEquals("loan maths: education total", 228000.0, education.getTotalRepayment());
+        assertEquals("loan maths: education EMI", 9500.0, education.getMonthlyEmi());
+
+        // A 6 month tenure is half a year, so the interest halves too.
+        Loan halfYear = new PersonalLoan(9001, 100000, 6);
+        assertEquals("loan maths: 6 month tenure is 0.5 years", 5000.0, halfYear.calculateInterest());
+    }
+
+    /** The same Loan reference gives different rates - method overriding at work. */
+    private static void testLoanTypePolymorphism() {
+        Loan[] loans = { new PersonalLoan(9002, 100000, 12), new EducationLoan(9002, 100000, 12) };
+        assertEquals("polymorphism: personal via Loan reference", 10000.0,
+                loans[0].calculateInterest());
+        assertEquals("polymorphism: education via Loan reference", 7000.0,
+                loans[1].calculateInterest());
+        assertTrue("polymorphism: personal reports its type",
+                PersonalLoan.TYPE.equals(loans[0].getLoanType()));
+        assertTrue("polymorphism: education reports its type",
+                EducationLoan.TYPE.equals(loans[1].getLoanType()));
+    }
+
+    private static void testLoanEligibilityRules() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        try {
+            bank.createAccount(20001, "Eligible Holder", "SAVINGS", 50000);
+            bank.createAccount(20002, "Poor Holder", "SAVINGS", 5000);
+        } catch (Exception e) {
+            fail("eligibility: setup threw " + e);
+            return;
+        }
+
+        try {
+            assertEquals("eligibility: max loan is 5x balance", 250000.0,
+                    loanService.getMaximumEligibleLoan(20001));
+            loanService.checkEligibility(20001, 200000);
+            pass("eligibility: 2,00,000 on a 50,000 balance is ELIGIBLE");
+        } catch (Exception e) {
+            fail("eligibility: 2,00,000 should have been eligible but threw " + e);
+        }
+
+        try {
+            loanService.checkEligibility(20001, 300000);
+            fail("eligibility: 3,00,000 should have been refused");
+        } catch (LoanNotEligibleException e) {
+            assertTrue("eligibility: reason names the maximum",
+                    e.getReason().contains("exceeds the maximum eligible loan amount"));
+        } catch (Exception e) {
+            fail("eligibility: wrong exception " + e);
+        }
+
+        try {
+            loanService.checkEligibility(20002, 1000);
+            fail("eligibility: a 5,000 balance should have been refused");
+        } catch (LoanNotEligibleException e) {
+            assertTrue("eligibility: reason names the minimum balance",
+                    e.getReason().contains("minimum balance"));
+        } catch (Exception e) {
+            fail("eligibility: wrong exception " + e);
+        }
+
+        try {
+            loanService.checkEligibility(20001, -5000);
+            fail("eligibility: a negative request should have been refused");
+        } catch (LoanNotEligibleException e) {
+            pass("eligibility: negative loan amount refused");
+        } catch (Exception e) {
+            fail("eligibility: wrong exception " + e);
+        }
+
+        try {
+            loanService.checkEligibility(29999, 1000);
+            fail("eligibility: unknown account should have been refused");
+        } catch (InvalidAccountException e) {
+            pass("eligibility: unknown account refused");
+        } catch (Exception e) {
+            fail("eligibility: wrong exception " + e);
+        }
+    }
+
+    private static void testApplyForLoanCreditsAccount() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        try {
+            bank.createAccount(21001, "Loan Applicant", "SAVINGS", 50000);
+            Loan loan = loanService.applyForLoan(21001, PersonalLoan.TYPE, 200000, 24);
+
+            assertTrue("apply: first loan id is 501", loan.getLoanId() == 501);
+            assertTrue("apply: loan becomes ACTIVE", Loan.STATUS_ACTIVE.equals(loan.getStatus()));
+            assertEquals("apply: total repayment", 240000.0, loan.getTotalRepayment());
+            assertEquals("apply: principal credited to the account", 250000.0,
+                    bank.checkBalance(21001));
+
+            List<Transaction> history = bank.getTransactionHistory(21001);
+            Transaction last = history.get(history.size() - 1);
+            assertTrue("apply: disbursement logged as a transaction",
+                    Transaction.LOAN_DISBURSED.equals(last.getType()));
+            assertEquals("apply: disbursement carries no tax", 0.0, last.getTax());
+
+            // Tenure outside the allowed range must be refused.
+            try {
+                loanService.applyForLoan(21001, PersonalLoan.TYPE, 10000, 0);
+                fail("apply: zero tenure should have been refused");
+            } catch (LoanNotEligibleException e) {
+                pass("apply: zero tenure refused");
+            }
+        } catch (Exception e) {
+            fail("apply threw " + e);
+        }
+    }
+
+    private static void testLoanRepaymentDebitsAccount() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        try {
+            bank.createAccount(22001, "Repaying Holder", "SAVINGS", 50000);
+            Loan loan = loanService.applyForLoan(22001, PersonalLoan.TYPE, 200000, 24);
+
+            loanService.makeRepayment(loan.getLoanId(), 10000);
+            assertEquals("repayment: amount paid", 10000.0, loan.getAmountPaid());
+            assertEquals("repayment: remaining amount", 230000.0, loan.getRemainingAmount());
+            assertEquals("repayment: account debited", 240000.0, bank.checkBalance(22001));
+            assertTrue("repayment: loan stays ACTIVE",
+                    Loan.STATUS_ACTIVE.equals(loan.getStatus()));
+
+            List<Transaction> history = bank.getTransactionHistory(22001);
+            Transaction last = history.get(history.size() - 1);
+            assertTrue("repayment: logged in the transaction history",
+                    Transaction.LOAN_REPAYMENT.equals(last.getType()));
+            assertEquals("repayment: carries no withdrawal tax", 0.0, last.getTax());
+        } catch (Exception e) {
+            fail("repayment threw " + e);
+        }
+    }
+
+    private static void testInvalidRepaymentsAreRejected() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        Loan loan = null;
+        try {
+            bank.createAccount(23001, "Invalid Repayer", "SAVINGS", 50000);
+            loan = loanService.applyForLoan(23001, PersonalLoan.TYPE, 100000, 12);
+        } catch (Exception e) {
+            fail("invalid repayment: setup threw " + e);
+            return;
+        }
+
+        try {
+            loanService.makeRepayment(99999, 1000);
+            fail("invalid repayment: unknown loan id should have been refused");
+        } catch (LoanNotFoundException e) {
+            pass("invalid repayment: unknown loan id refused");
+        } catch (Exception e) {
+            fail("invalid repayment: wrong exception " + e);
+        }
+
+        try {
+            loanService.makeRepayment(loan.getLoanId(), 0);
+            fail("invalid repayment: zero amount should have been refused");
+        } catch (InvalidRepaymentException e) {
+            pass("invalid repayment: zero amount refused");
+        } catch (Exception e) {
+            fail("invalid repayment: wrong exception " + e);
+        }
+
+        try {
+            // Total repayment is 1,10,000 - paying more must be refused.
+            loanService.makeRepayment(loan.getLoanId(), 120000);
+            fail("invalid repayment: overpayment should have been refused");
+        } catch (InvalidRepaymentException e) {
+            pass("invalid repayment: more than the remaining amount refused");
+        } catch (Exception e) {
+            fail("invalid repayment: wrong exception " + e);
+        }
+
+        try {
+            assertEquals("invalid repayment: nothing was paid", 0.0, loan.getAmountPaid());
+            assertEquals("invalid repayment: account untouched", 150000.0,
+                    bank.checkBalance(23001));
+        } catch (InvalidAccountException e) {
+            fail("invalid repayment: account vanished");
+        }
+    }
+
+    private static void testRepaymentNeedsAccountBalance() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        try {
+            bank.createAccount(24001, "Empty Repayer", "SAVINGS", 10000);
+            Loan loan = loanService.applyForLoan(24001, PersonalLoan.TYPE, 50000, 12);
+            // Balance is now 60,000. Take most of it back out again.
+            bank.withdraw(24001, 55000);
+
+            loanService.makeRepayment(loan.getLoanId(), 5000);
+            fail("repayment balance: should have failed on insufficient balance");
+        } catch (InsufficientBalanceException e) {
+            pass("repayment balance: refused when the account cannot afford it");
+        } catch (Exception e) {
+            fail("repayment balance: wrong exception " + e);
+        }
+        try {
+            Loan loan = loanService.findLoan(501);
+            assertEquals("repayment balance: loan untouched after a failed repayment", 0.0,
+                    loan.getAmountPaid());
+        } catch (LoanNotFoundException e) {
+            fail("repayment balance: loan vanished");
+        }
+    }
+
+    private static void testLoanCompletion() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        try {
+            bank.createAccount(25001, "Completing Holder", "SAVINGS", 50000);
+            Loan loan = loanService.applyForLoan(25001, PersonalLoan.TYPE, 10000, 12);
+            assertEquals("completion: total repayment", 11000.0, loan.getTotalRepayment());
+
+            loanService.makeRepayment(loan.getLoanId(), 11000);
+            assertEquals("completion: nothing remaining", 0.0, loan.getRemainingAmount());
+            assertTrue("completion: status becomes COMPLETED", loan.isCompleted());
+            assertTrue("completion: status word is COMPLETED",
+                    Loan.STATUS_COMPLETED.equals(loanService.getLoanStatus(loan.getLoanId())));
+            assertEquals("completion: account debited in full", 49000.0, bank.checkBalance(25001));
+
+            try {
+                loanService.makeRepayment(loan.getLoanId(), 100);
+                fail("completion: repayment on a completed loan should have been refused");
+            } catch (InvalidRepaymentException e) {
+                pass("completion: repayment on a completed loan refused");
+            }
+        } catch (Exception e) {
+            fail("completion threw " + e);
+        }
+    }
+
+    private static void testRepaymentHistoryIsReadBackFromFile() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        try {
+            bank.createAccount(26001, "History Borrower", "SAVINGS", 50000);
+            Loan loan = loanService.applyForLoan(26001, EducationLoan.TYPE, 100000, 12);
+            loanService.makeRepayment(loan.getLoanId(), 10000);
+            loanService.makeRepayment(loan.getLoanId(), 10000);
+            loanService.makeRepayment(loan.getLoanId(), 5000);
+
+            List<LoanRepayment> history = loanService.getRepaymentHistory(loan.getLoanId());
+            assertTrue("loan history: three repayments recorded", history.size() == 3);
+            assertTrue("loan history: ids run 1, 2, 3",
+                    history.get(0).getRepaymentId() == 1 && history.get(2).getRepaymentId() == 3);
+            assertEquals("loan history: total paid", 25000.0,
+                    loanService.getTotalPaid(loan.getLoanId()));
+            assertEquals("loan history: remaining on a 7% education loan", 82000.0,
+                    loan.getRemainingAmount());
+        } catch (Exception e) {
+            fail("loan history threw " + e);
+        }
+    }
+
+    private static void testLoansSurviveRestart() {
+        cleanTestData();
+        BankService first = newBank();
+        LoanService firstLoans = newLoanService(first);
+        try {
+            first.createAccount(27001, "Persistent Borrower", "CURRENT", 50000);
+            Loan loan = firstLoans.applyForLoan(27001, PersonalLoan.TYPE, 200000, 24);
+            firstLoans.makeRepayment(loan.getLoanId(), 40000);
+        } catch (Exception e) {
+            fail("loan persistence: setup threw " + e);
+            return;
+        }
+
+        // Brand new services read the same files back - simulating a restart.
+        BankService second = newBank();
+        LoanService secondLoans = newLoanService(second);
+        try {
+            Loan reloaded = secondLoans.findLoan(501);
+            assertTrue("loan persistence: type survives restart",
+                    PersonalLoan.TYPE.equals(reloaded.getLoanType()));
+            assertEquals("loan persistence: principal survives restart", 200000.0,
+                    reloaded.getPrincipalAmount());
+            assertEquals("loan persistence: amount paid survives restart", 40000.0,
+                    reloaded.getAmountPaid());
+            assertEquals("loan persistence: remaining survives restart", 200000.0,
+                    reloaded.getRemainingAmount());
+            assertTrue("loan persistence: status survives restart",
+                    Loan.STATUS_ACTIVE.equals(reloaded.getStatus()));
+            assertEquals("loan persistence: account balance survives restart", 210000.0,
+                    second.checkBalance(27001));
+            assertTrue("loan persistence: repayment log survives restart",
+                    secondLoans.getRepaymentHistory(501).size() == 1);
+        } catch (Exception e) {
+            fail("loan persistence: reload threw " + e);
+        }
+    }
+
+    /** Regression guard: the loan feature must not disturb the withdrawal tax. */
+    private static void testTaxCalculatorStillWorksAfterLoanFeature() {
+        cleanTestData();
+        BankService bank = newBank();
+        LoanService loanService = newLoanService(bank);
+        try {
+            bank.createAccount(28001, "Tax Guard", "CURRENT", 100000);
+            loanService.applyForLoan(28001, PersonalLoan.TYPE, 200000, 24);
+            // Balance is now 3,00,000 - the brief's worked example, unchanged.
+            Transaction withdrawal = bank.withdraw(28001, 150000);
+            assertEquals("tax guard: 2% tax on a current account still applies", 3000.0,
+                    withdrawal.getTax());
+            assertEquals("tax guard: total deducted", 153000.0, withdrawal.getTotal());
+            assertEquals("tax guard: remaining balance", 147000.0, bank.checkBalance(28001));
+        } catch (Exception e) {
+            fail("tax guard threw " + e);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -358,6 +732,11 @@ public class BankSystemTest {
 
     private static BankService newBank() {
         return new BankService(new FileManager(TEST_DATA_DIR));
+    }
+
+    /** Fresh, empty bank plus its loan service - used by the loan tests. */
+    private static LoanService newLoanService(BankService bank) {
+        return new LoanService(bank, new FileManager(TEST_DATA_DIR));
     }
 
     private static void cleanTestData() {

@@ -19,6 +19,8 @@ public class Transaction {
     public static final String ACCOUNT_OPEN = "ACCOUNT_OPEN";
     public static final String CLOSE_SETTLEMENT = "CLOSE_SETTLEMENT";
     public static final String ACCOUNT_CLOSE = "ACCOUNT_CLOSE";
+    public static final String LOAN_DISBURSED = "LOAN_DISBURSED";
+    public static final String LOAN_REPAYMENT = "LOAN_REPAYMENT";
 
     /** Placeholder used when a transaction involves only one account. */
     public static final int NO_SECOND_ACCOUNT = -1;

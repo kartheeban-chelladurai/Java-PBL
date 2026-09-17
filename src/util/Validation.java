@@ -10,6 +10,10 @@ public final class Validation {
     /** Longest account number accepted (keeps the value inside an int). */
     public static final int MAX_ACCOUNT_NUMBER = 999999999;
 
+    /** Loan tenure limits, in months. */
+    public static final int MIN_TENURE_MONTHS = 1;
+    public static final int MAX_TENURE_MONTHS = 360;
+
     private Validation() {
         // utility class
     }
@@ -113,13 +117,79 @@ public final class Validation {
         return null;
     }
 
-    /** True when the text is one of the menu choices 1-8. */
-    public static boolean isValidMenuChoice(String input) {
+    /** True when the text is a whole number between 1 and maxOption. */
+    public static boolean isValidMenuChoice(String input, int maxOption) {
         if (input == null) {
             return false;
         }
         String trimmed = input.trim();
-        return trimmed.length() == 1 && trimmed.charAt(0) >= '1' && trimmed.charAt(0) <= '8';
+        if (trimmed.isEmpty() || trimmed.length() > 2) {
+            return false;
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            if (!Character.isDigit(trimmed.charAt(i))) {
+                return false;
+            }
+        }
+        int choice = Integer.parseInt(trimmed);
+        return choice >= 1 && choice <= maxOption;
+    }
+
+    // ------------------------------------------------------------------
+    // Loan specific validation
+    // ------------------------------------------------------------------
+
+    /** Loan tenure must be a whole number of months, 1 to 360 (30 years). */
+    public static boolean isValidTenure(String input) {
+        if (input == null) {
+            return false;
+        }
+        String trimmed = input.trim();
+        if (trimmed.isEmpty() || trimmed.length() > 3) {
+            return false;
+        }
+        for (int i = 0; i < trimmed.length(); i++) {
+            if (!Character.isDigit(trimmed.charAt(i))) {
+                return false;
+            }
+        }
+        int months = Integer.parseInt(trimmed);
+        return months >= MIN_TENURE_MONTHS && months <= MAX_TENURE_MONTHS;
+    }
+
+    /** Parses an already validated tenure. */
+    public static int parseTenure(String input) {
+        return Integer.parseInt(input.trim());
+    }
+
+    /** Loan ids follow the same rule as account numbers: digits, greater than zero. */
+    public static boolean isValidLoanId(String input) {
+        return isValidAccountNumber(input);
+    }
+
+    /** Parses an already validated loan id. */
+    public static int parseLoanId(String input) {
+        return Integer.parseInt(input.trim());
+    }
+
+    /** Accepts 1/P/PERSONAL or 2/E/EDUCATION in any case. */
+    public static boolean isValidLoanType(String input) {
+        return normaliseLoanType(input) != null;
+    }
+
+    /** Returns PERSONAL, EDUCATION or null when the text is not a known type. */
+    public static String normaliseLoanType(String input) {
+        if (input == null) {
+            return null;
+        }
+        String value = input.trim().toUpperCase();
+        if (value.equals("1") || value.equals("P") || value.equals("PERSONAL")) {
+            return "PERSONAL";
+        }
+        if (value.equals("2") || value.equals("E") || value.equals("EDUCATION")) {
+            return "EDUCATION";
+        }
+        return null;
     }
 
     /** Rounds a money value to two decimal places. */
